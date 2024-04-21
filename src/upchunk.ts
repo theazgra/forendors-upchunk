@@ -48,6 +48,7 @@ export type ChunkedStreamIterableOptions = {
   defaultChunkSize?: number;
   minChunkSize?: number;
   maxChunkSize?: number;
+  useFileSlicing?: boolean;
 };
 
 // An Iterable that accepts a readableStream of binary data (Blob | Uint8Array) and provides
@@ -59,9 +60,10 @@ export class ChunkedStreamIterable implements AsyncIterable<Blob> {
   protected _error: Error | undefined;
   public readonly minChunkSize: number;
   public readonly maxChunkSize: number;
+  public readonly useFileSlicing: boolean;
 
   constructor(
-    protected readableStream: ReadableStream<Uint8Array | Blob>,
+    protected readableStreamOrFile: ReadableStream<Uint8Array | Blob> | File,
     options: ChunkedStreamIterableOptions = {}
   ) {
     if (!isValidChunkSize(options.defaultChunkSize, options)) {
@@ -70,6 +72,7 @@ export class ChunkedStreamIterable implements AsyncIterable<Blob> {
     this.defaultChunkSize = options.defaultChunkSize ?? DEFAULT_CHUNK_SIZE;
     this.minChunkSize = options.minChunkSize ?? DEFAULT_MIN_CHUNK_SIZE;
     this.maxChunkSize = options.maxChunkSize ?? DEFAULT_MAX_CHUNK_SIZE;
+    this.useFileSlicing = options.useFileSlicing ?? false;
   }
 
   get chunkSize() {
@@ -92,8 +95,32 @@ export class ChunkedStreamIterable implements AsyncIterable<Blob> {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<Blob> {
+
+    if (this.useFileSlicing) {
+      const file = this.readableStreamOrFile as File;
+      let currentByte = 0;
+      const fileSize = file.size;
+
+      while (true) {
+        const chunk = file.slice(currentByte, currentByte + this.chunkByteSize);
+        currentByte += chunk.size;
+
+        if (currentByte < fileSize && chunk.size !== this.chunkByteSize) {
+          console.error(`Chunk size is not equal to chunkByteSize. ChunkSize=${chunk.size}|chunkByteSize=${this.chunkByteSize}`);
+        }
+
+        yield chunk;
+
+        if (currentByte >= fileSize) {
+          break;
+        }
+      }
+
+      return;
+    }
+
     let chunk;
-    const reader = this.readableStream.getReader();
+    const reader = (this.readableStreamOrFile as ReadableStream<Uint8Array | Blob>).getReader();
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -234,6 +261,7 @@ export interface UpChunkOptions {
   dynamicChunkSize?: boolean;
   maxChunkSize?: number;
   minChunkSize?: number;
+  useFileSlicing?: boolean;
 }
 
 export class UpChunk {
@@ -267,6 +295,8 @@ export class UpChunk {
 
   private eventTarget: EventTarget<Record<EventName, UpchunkEvent>>;
 
+  private useFileSlicing: boolean;
+
   constructor(options: UpChunkOptions) {
     this.endpoint = options.endpoint;
     this.file = options.file;
@@ -290,11 +320,13 @@ export class UpChunk {
     this.success = false;
     this.nextChunkRangeStart = 0;
 
+    this.useFileSlicing = options.useFileSlicing || false;
+
     // Types appear to be getting confused in env setup, using the overloaded NodeJS Blob definition, which uses NodeJS.ReadableStream instead
     // of the DOM type definitions. For definitions, See consumers.d.ts vs. lib.dom.d.ts. (CJP)
     this.chunkedStreamIterable = new ChunkedStreamIterable(
-      this.file.stream() as unknown as ReadableStream<Uint8Array>,
-      { ...options, defaultChunkSize: options.chunkSize }
+      this.useFileSlicing ? this.file : this.file.stream() as unknown as ReadableStream<Uint8Array>,
+      { ...options, defaultChunkSize: options.chunkSize, useFileSlicing: this.useFileSlicing }
     );
     this.chunkedStreamIterator =
       this.chunkedStreamIterable[Symbol.asyncIterator]();
